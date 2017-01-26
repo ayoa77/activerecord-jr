@@ -1,10 +1,77 @@
 require 'sqlite3'
 
 module Database
+
   class InvalidAttributeError < StandardError;end
   class NotConnectedError < StandardError;end
 
   class Model
+    def initialize(attributes = {})
+      attributes.symbolize_keys!
+
+      raise_error_if_invalid_attribute!(attributes.keys)
+
+      # This defines the value even if it's not present in attributes
+      @attributes = {}
+
+      Self.class.attribute_names.each do |name|
+        @attributes[name] = attributes[name]
+      end
+
+      def [](attribute)
+        raise_error_if_invalid_attribute!(attribute)
+
+        @attributes[attribute]
+      end
+
+      def []=(attribute, value)
+        raise_error_if_invalid_attribute!(attribute)
+
+        @attributes[attribute] = value
+      end
+
+      def self.all
+        Self.class.execute("SELECT * FROM #{self.table_name}").map do |row|
+          Self.new(row)
+        end
+      end
+
+      def self.create(attributes)
+        record = self.new(attributes)
+        record.save
+
+        record
+      end
+
+      def self.where(query, *args)
+        Database::Model.execute("SELECT * FROM #{self.table_name} WHERE #{query}", *args).map do |row|
+          self.new(row)
+        end
+      end
+
+      def self.find(pk)
+        Self.where('id = ?', pk).first
+      end
+
+      def new_record?
+        Self[:id].nil?
+      end
+
+      def save
+        if new_record?
+          results = insert!
+        else
+          results = update!
+        end
+
+        # When we save, remove changes between new and old attributes
+        @old_attributes = @attributes.dup
+
+        results
+      end
+      @old_attributes = @attributes.dup
+    end
+
     def self.inherited(klass)
     end
 
@@ -77,6 +144,38 @@ module Database
     end
 
     private
+
+    def insert!
+      self[:created_at] = DateTime.now
+      self[:updated_at] = DateTime.now
+
+      fields = self.attributes.keys
+      values = self.attributes.values
+      marks  = Array.new(fields.length) { '?' }.join(',')
+
+      insert_sql = "INSERT INTO #{self.class.table_name} (#{fields.join(',')}) VALUES (#{marks})"
+
+      results = self.class.execute(insert_sql, *values)
+
+      # This fetches the new primary key and updates this instance
+      self[:id] = self.class.last_insert_row_id
+      results
+    end
+
+    def update!
+      self[:updated_at] = DateTime.now
+
+      fields = self.attributes.keys
+      values = self.attributes.values
+
+      update_clause = fields.map { |field| "#{field} = ?" }.join(',')
+      update_sql = "UPDATE #{self.class.table_name} SET #{update_clause} WHERE id = ?"
+
+      # We have to use the (potentially) old ID attribute in case the user has re-set it.
+      self.class.execute(update_sql, *values, self.old_attributes[:id])
+    end
+
+
     def self.prepare_value(value)
       case value
       when Time, DateTime, Date
